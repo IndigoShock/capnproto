@@ -78,7 +78,7 @@ public:
       : context(context), disk(kj::newDiskFilesystem()), loader(*this) {}
 
   kj::MainFunc getMain() {
-    if (context.getProgramName().endsWith("capnpc")) {
+    if (context.getProgramName().endsWith("capnpc") || context.getProgramName().endsWith("capnpc.exe")) {
       kj::MainBuilder builder(context, VERSION_STRING,
             "Compiles Cap'n Proto schema files and generates corresponding source code in one or "
             "more languages.");
@@ -131,7 +131,7 @@ public:
     annotationFlag = Compiler::DROP_ANNOTATIONS;
 
     kj::MainBuilder builder(context, VERSION_STRING,
-          "Convers messages between formats. Reads a stream of messages from stdin in format "
+          "Converts messages between formats. Reads a stream of messages from stdin in format "
           "<from> and writes them to stdout in format <to>. Valid formats are:\n"
           "    binary      standard binary format\n"
           "    packed      packed binary format (deflates zeroes)\n"

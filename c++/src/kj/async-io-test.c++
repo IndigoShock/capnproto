@@ -946,6 +946,32 @@ KJ_TEST("Userland pipe pumpTo with limit") {
   KJ_EXPECT_THROW_MESSAGE("abortRead() has been called", pipe.out->write("baz", 3).wait(ws));
 }
 
+KJ_TEST("Userland pipe pump into zero-limited pipe, no data to pump") {
+  kj::EventLoop loop;
+  WaitScope ws(loop);
+
+  auto pipe = newOneWayPipe();
+  auto pipe2 = newOneWayPipe(uint64_t(0));
+  auto pumpPromise = KJ_ASSERT_NONNULL(pipe2.out->tryPumpFrom(*pipe.in));
+
+  expectRead(*pipe2.in, "");
+  pipe.out = nullptr;
+  KJ_EXPECT(pumpPromise.wait(ws) == 0);
+}
+
+KJ_TEST("Userland pipe pump into zero-limited pipe, data is pumped") {
+  kj::EventLoop loop;
+  WaitScope ws(loop);
+
+  auto pipe = newOneWayPipe();
+  auto pipe2 = newOneWayPipe(uint64_t(0));
+  auto pumpPromise = KJ_ASSERT_NONNULL(pipe2.out->tryPumpFrom(*pipe.in));
+
+  expectRead(*pipe2.in, "");
+  auto writePromise = pipe.out->write("foo", 3);
+  KJ_EXPECT_THROW_MESSAGE("abortRead() has been called", pumpPromise.wait(ws));
+}
+
 KJ_TEST("Userland pipe gather write") {
   kj::EventLoop loop;
   WaitScope ws(loop);
@@ -1373,6 +1399,51 @@ KJ_TEST("Userland pipe pumpFrom EOF on abortRead()") {
   pipe2.in = nullptr;  // force pump to notice EOF
   KJ_EXPECT(pumpPromise.wait(ws) == 6);
   pipe2.out = nullptr;
+}
+
+KJ_TEST("Userland pipe EOF fulfills pumpFrom promise") {
+  kj::EventLoop loop;
+  WaitScope ws(loop);
+
+  auto pipe = newOneWayPipe();
+  auto pipe2 = newOneWayPipe();
+  auto pumpPromise = KJ_ASSERT_NONNULL(pipe2.out->tryPumpFrom(*pipe.in));
+
+  auto writePromise = pipe.out->write("foobar", 6);
+  KJ_EXPECT(!writePromise.poll(ws));
+  auto pipe3 = newOneWayPipe();
+  auto pumpPromise2 = pipe2.in->pumpTo(*pipe3.out);
+  KJ_EXPECT(!pumpPromise2.poll(ws));
+  expectRead(*pipe3.in, "foobar").wait(ws);
+  writePromise.wait(ws);
+
+  KJ_EXPECT(!pumpPromise.poll(ws));
+  pipe.out = nullptr;
+  KJ_EXPECT(pumpPromise.wait(ws) == 6);
+
+  KJ_EXPECT(!pumpPromise2.poll(ws));
+  pipe2.out = nullptr;
+  KJ_EXPECT(pumpPromise2.wait(ws) == 6);
+}
+
+KJ_TEST("Userland pipe tryPumpFrom to pumpTo for same amount fulfills simultaneously") {
+  kj::EventLoop loop;
+  WaitScope ws(loop);
+
+  auto pipe = newOneWayPipe();
+  auto pipe2 = newOneWayPipe();
+  auto pumpPromise = KJ_ASSERT_NONNULL(pipe2.out->tryPumpFrom(*pipe.in, 6));
+
+  auto writePromise = pipe.out->write("foobar", 6);
+  KJ_EXPECT(!writePromise.poll(ws));
+  auto pipe3 = newOneWayPipe();
+  auto pumpPromise2 = pipe2.in->pumpTo(*pipe3.out, 6);
+  KJ_EXPECT(!pumpPromise2.poll(ws));
+  expectRead(*pipe3.in, "foobar").wait(ws);
+  writePromise.wait(ws);
+
+  KJ_EXPECT(pumpPromise.wait(ws) == 6);
+  KJ_EXPECT(pumpPromise2.wait(ws) == 6);
 }
 
 constexpr static auto TEE_MAX_CHUNK_SIZE = 1 << 14;

@@ -22,18 +22,18 @@
 #if _WIN32
 // For Unix implementation, see filesystem-disk-unix.c++.
 
+// Request Vista-level APIs.
+#define WINVER 0x0600
+#define _WIN32_WINNT 0x0600
+
+#define WIN32_LEAN_AND_MEAN  // ::eyeroll::
+
 #include "filesystem.h"
 #include "debug.h"
 #include "encoding.h"
 #include "vector.h"
 #include <algorithm>
 #include <wchar.h>
-
-// Request Vista-level APIs.
-#define WINVER 0x0600
-#define _WIN32_WINNT 0x0600
-
-#define WIN32_LEAN_AND_MEAN  // ::eyeroll::
 
 #include <windows.h>
 #include <winioctl.h>
@@ -869,6 +869,7 @@ public:
             // Retry, but make sure we don't try to create the parent again.
             return tryReplaceNode(path, mode - WriteMode::CREATE_PARENT, kj::mv(tryCreate));
           }
+          // fallthrough
         default:
           KJ_FAIL_WIN32("create(path)", error, path) { return false; }
       } else {
@@ -1514,7 +1515,7 @@ public:
     Vector<Entry> results;
     for (uint i = 0; i < 26; i++) {
       if (drives & (1 << i)) {
-        char name[2] = { 'A' + i, ':' };
+        char name[2] = { static_cast<char>('A' + i), ':' };
         results.add(Entry { FsNode::Type::DIRECTORY, kj::heapString(name, 2) });
       }
     }
