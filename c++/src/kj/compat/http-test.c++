@@ -24,6 +24,7 @@
 #include "http.h"
 #include <kj/debug.h>
 #include <kj/test.h>
+#include <kj/encoding.h>
 #include <map>
 
 #if KJ_HTTP_TEST_USE_OS_PIPE
@@ -126,7 +127,7 @@ KJ_TEST("HttpHeaders::parseRequest") {
       "DATE:     early\r\n"
       "other-Header: yep\r\n"
       "\r\n");
-  auto result = KJ_ASSERT_NONNULL(headers.tryParseRequest(text.asArray()));
+  auto result = headers.tryParseRequest(text.asArray()).get<HttpHeaders::Request>();
 
   KJ_EXPECT(result.method == HttpMethod::POST);
   KJ_EXPECT(result.url == "/some/path");
@@ -176,7 +177,7 @@ KJ_TEST("HttpHeaders::parseResponse") {
       "DATE:     early\r\n"
       "other-Header: yep\r\n"
       "\r\n");
-  auto result = KJ_ASSERT_NONNULL(headers.tryParseResponse(text.asArray()));
+  auto result = headers.tryParseResponse(text.asArray()).get<HttpHeaders::Response>();
 
   KJ_EXPECT(result.statusCode == 418);
   KJ_EXPECT(result.statusText == "I'm a teapot");
@@ -215,40 +216,72 @@ KJ_TEST("HttpHeaders parse invalid") {
   HttpHeaders headers(*table);
 
   // NUL byte in request.
-  KJ_EXPECT(headers.tryParseRequest(kj::heapString(
-      "POST  \0 /some/path \t   HTTP/1.1\r\n"
-      "Foo-BaR: Baz\r\n"
-      "Host: example.com\r\n"
-      "DATE:     early\r\n"
-      "other-Header: yep\r\n"
-      "\r\n")) == nullptr);
+  {
+    auto input = kj::heapString(
+        "POST  \0 /some/path \t   HTTP/1.1\r\n"
+        "Foo-BaR: Baz\r\n"
+        "Host: example.com\r\n"
+        "DATE:     early\r\n"
+        "other-Header: yep\r\n"
+        "\r\n");
+
+    auto protocolError = headers.tryParseRequest(input).get<HttpHeaders::ProtocolError>();
+
+    KJ_EXPECT(protocolError.description == "ERROR: Request headers have no terminal newline.",
+        protocolError.description);
+    KJ_EXPECT(protocolError.rawContent.asChars() == input);
+  }
 
   // Control character in header name.
-  KJ_EXPECT(headers.tryParseRequest(kj::heapString(
-      "POST   /some/path \t   HTTP/1.1\r\n"
-      "Foo-BaR: Baz\r\n"
-      "Cont\001ent-Length: 123\r\n"
-      "DATE:     early\r\n"
-      "other-Header: yep\r\n"
-      "\r\n")) == nullptr);
+  {
+    auto input = kj::heapString(
+        "POST   /some/path \t   HTTP/1.1\r\n"
+        "Foo-BaR: Baz\r\n"
+        "Cont\001ent-Length: 123\r\n"
+        "DATE:     early\r\n"
+        "other-Header: yep\r\n"
+        "\r\n");
+
+    auto protocolError = headers.tryParseRequest(input).get<HttpHeaders::ProtocolError>();
+
+    KJ_EXPECT(protocolError.description == "ERROR: The headers sent by your client are not valid.",
+        protocolError.description);
+    KJ_EXPECT(protocolError.rawContent.asChars() == input);
+  }
 
   // Separator character in header name.
-  KJ_EXPECT(headers.tryParseRequest(kj::heapString(
-      "POST   /some/path \t   HTTP/1.1\r\n"
-      "Foo-BaR: Baz\r\n"
-      "Host: example.com\r\n"
-      "DATE/:     early\r\n"
-      "other-Header: yep\r\n"
-      "\r\n")) == nullptr);
+  {
+     auto input = kj::heapString(
+        "POST   /some/path \t   HTTP/1.1\r\n"
+        "Foo-BaR: Baz\r\n"
+        "Host: example.com\r\n"
+        "DATE/:     early\r\n"
+        "other-Header: yep\r\n"
+        "\r\n");
+
+    auto protocolError = headers.tryParseRequest(input).get<HttpHeaders::ProtocolError>();
+
+    KJ_EXPECT(protocolError.description == "ERROR: The headers sent by your client are not valid.",
+        protocolError.description);
+    KJ_EXPECT(protocolError.rawContent.asChars() == input);
+  }
 
   // Response status code not numeric.
-  KJ_EXPECT(headers.tryParseResponse(kj::heapString(
+  {
+     auto input = kj::heapString(
       "HTTP/1.1\t\t  abc\t    I'm a teapot\r\n"
       "Foo-BaR: Baz\r\n"
       "Host: example.com\r\n"
       "DATE:     early\r\n"
       "other-Header: yep\r\n"
-      "\r\n")) == nullptr);
+      "\r\n");
+
+    auto protocolError = headers.tryParseRequest(input).get<HttpHeaders::ProtocolError>();
+
+    KJ_EXPECT(protocolError.description == "ERROR: Unrecognized request method.",
+        protocolError.description);
+    KJ_EXPECT(protocolError.rawContent.asChars() == input);
+  }
 }
 
 KJ_TEST("HttpHeaders validation") {
@@ -802,6 +835,36 @@ kj::ArrayPtr<const HttpResponseTestCase> responseTestCases() {
 
     {
       "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "Transfer-Encoding: identity\r\n"
+      "Content-Length: foobar\r\n"  // intentionally wrong
+      "\r\n"
+      "baz qux",
+
+      200, "OK",
+      {{HttpHeaderId::CONTENT_TYPE, "text/plain"}},
+      nullptr, {"baz qux"},
+
+      HttpMethod::GET,
+      CLIENT_ONLY,   // Server never sends transfer-encoding: identity
+    },
+
+    {
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n"
+      "baz qux",
+
+      200, "OK",
+      {{HttpHeaderId::CONTENT_TYPE, "text/plain"}},
+      nullptr, {"baz qux"},
+
+      HttpMethod::GET,
+      CLIENT_ONLY,   // Server never sends non-delimited message
+    },
+
+    {
+      "HTTP/1.1 200 OK\r\n"
       "Content-Length: 123\r\n"
       "Content-Type: text/plain\r\n"
       "\r\n",
@@ -912,6 +975,10 @@ KJ_TEST("HttpClient canceled write") {
     memset(body.begin(), 0xcf, body.size());
 
     auto req = client->request(HttpMethod::POST, "/", HttpHeaders(table), uint64_t(4096));
+
+    // Note: This poll() forces the server to receive what was written so far. Otherwise,
+    //   cancelling the write below may in fact cancel the previous write as well.
+    KJ_EXPECT(!serverPromise.poll(waitScope));
 
     // Start a write and immediately cancel it.
     {
@@ -2368,6 +2435,193 @@ KJ_TEST("HttpServer threw exception") {
   auto text = pipe.ends[1]->readAllText().wait(waitScope);
 
   KJ_EXPECT(text.startsWith("HTTP/1.1 500 Internal Server Error"), text);
+}
+
+KJ_TEST("HttpServer bad request") {
+  KJ_HTTP_TEST_SETUP_IO;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+  auto pipe = KJ_HTTP_TEST_CREATE_2PIPE;
+
+  HttpHeaderTable table;
+  BrokenHttpService service;
+  HttpServer server(timer, table, service);
+
+  auto listenTask = server.listenHttp(kj::mv(pipe.ends[0]));
+
+  static constexpr auto request = "GET / HTTP/1.1\r\nbad request\r\n\r\n"_kj;
+  auto writePromise = pipe.ends[1]->write(request.begin(), request.size());
+  auto response = pipe.ends[1]->readAllText().wait(waitScope);
+  KJ_EXPECT(writePromise.poll(waitScope));
+  writePromise.wait(waitScope);
+
+  static constexpr auto expectedResponse =
+      "HTTP/1.1 400 Bad Request\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 53\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n"
+      "ERROR: The headers sent by your client are not valid."_kj;
+
+  KJ_EXPECT(expectedResponse == response, expectedResponse, response);
+}
+
+KJ_TEST("HttpServer invalid method") {
+  KJ_HTTP_TEST_SETUP_IO;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+  auto pipe = KJ_HTTP_TEST_CREATE_2PIPE;
+
+  HttpHeaderTable table;
+  BrokenHttpService service;
+  HttpServer server(timer, table, service);
+
+  auto listenTask = server.listenHttp(kj::mv(pipe.ends[0]));
+
+  static constexpr auto request = "bad request\r\n\r\n"_kj;
+  auto writePromise = pipe.ends[1]->write(request.begin(), request.size());
+  auto response = pipe.ends[1]->readAllText().wait(waitScope);
+  KJ_EXPECT(writePromise.poll(waitScope));
+  writePromise.wait(waitScope);
+
+  static constexpr auto expectedResponse =
+      "HTTP/1.1 501 Not Implemented\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 35\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n"
+      "ERROR: Unrecognized request method."_kj;
+
+  KJ_EXPECT(expectedResponse == response, expectedResponse, response);
+}
+
+// Ensure that HttpServerSettings can continue to be constexpr.
+KJ_UNUSED static constexpr HttpServerSettings STATIC_CONSTEXPR_SETTINGS {};
+
+class TestErrorHandler: public HttpServerErrorHandler {
+public:
+  kj::Promise<void> handleClientProtocolError(
+      HttpHeaders::ProtocolError protocolError, kj::HttpService::Response& response) override {
+    // In a real error handler, you should redact `protocolError.rawContent`.
+    auto message = kj::str("Saw protocol error: ", protocolError.description, "; rawContent = ",
+        encodeCEscape(protocolError.rawContent));
+    return sendError(400, "Bad Request", kj::mv(message), response);
+  }
+
+  kj::Promise<void> handleApplicationError(
+      kj::Exception exception, kj::Maybe<kj::HttpService::Response&> response) override {
+    return sendError(500, "Internal Server Error",
+        kj::str("Saw application error: ", exception.getDescription()), response);
+  }
+
+  kj::Promise<void> handleNoResponse(kj::HttpService::Response& response) override {
+    return sendError(500, "Internal Server Error", kj::str("Saw no response."), response);
+  }
+
+  static TestErrorHandler instance;
+
+private:
+  kj::Promise<void> sendError(uint statusCode, kj::StringPtr statusText, String message,
+      Maybe<HttpService::Response&> response) {
+    KJ_IF_MAYBE(r, response) {
+      HttpHeaderTable headerTable;
+      HttpHeaders headers(headerTable);
+      auto body = r->send(statusCode, statusText, headers, message.size());
+      return body->write(message.begin(), message.size()).attach(kj::mv(body), kj::mv(message));
+    } else {
+      KJ_LOG(ERROR, "Saw an error but too late to report to client.");
+      return kj::READY_NOW;
+    }
+  }
+};
+
+TestErrorHandler TestErrorHandler::instance {};
+
+KJ_TEST("HttpServer no response, custom error handler") {
+  auto PIPELINE_TESTS = pipelineTestCases();
+
+  KJ_HTTP_TEST_SETUP_IO;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+  auto pipe = KJ_HTTP_TEST_CREATE_2PIPE;
+
+  HttpServerSettings settings {};
+  settings.errorHandler = TestErrorHandler::instance;
+
+  HttpHeaderTable table;
+  BrokenHttpService service;
+  HttpServer server(timer, table, service, settings);
+
+  auto listenTask = server.listenHttp(kj::mv(pipe.ends[0]));
+
+  // Do one request.
+  pipe.ends[1]->write(PIPELINE_TESTS[0].request.raw.begin(), PIPELINE_TESTS[0].request.raw.size())
+      .wait(waitScope);
+  auto text = pipe.ends[1]->readAllText().wait(waitScope);
+
+  KJ_EXPECT(text ==
+      "HTTP/1.1 500 Internal Server Error\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 16\r\n"
+      "\r\n"
+      "Saw no response.", text);
+}
+
+KJ_TEST("HttpServer threw exception, custom error handler") {
+  auto PIPELINE_TESTS = pipelineTestCases();
+
+  KJ_HTTP_TEST_SETUP_IO;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+  auto pipe = KJ_HTTP_TEST_CREATE_2PIPE;
+
+  HttpServerSettings settings {};
+  settings.errorHandler = TestErrorHandler::instance;
+
+  HttpHeaderTable table;
+  BrokenHttpService service(KJ_EXCEPTION(FAILED, "failed"));
+  HttpServer server(timer, table, service, settings);
+
+  auto listenTask = server.listenHttp(kj::mv(pipe.ends[0]));
+
+  // Do one request.
+  pipe.ends[1]->write(PIPELINE_TESTS[0].request.raw.begin(), PIPELINE_TESTS[0].request.raw.size())
+      .wait(waitScope);
+  auto text = pipe.ends[1]->readAllText().wait(waitScope);
+
+  KJ_EXPECT(text ==
+      "HTTP/1.1 500 Internal Server Error\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 29\r\n"
+      "\r\n"
+      "Saw application error: failed", text);
+}
+
+KJ_TEST("HttpServer bad request, custom error handler") {
+  KJ_HTTP_TEST_SETUP_IO;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+  auto pipe = KJ_HTTP_TEST_CREATE_2PIPE;
+
+  HttpServerSettings settings {};
+  settings.errorHandler = TestErrorHandler::instance;
+
+  HttpHeaderTable table;
+  BrokenHttpService service;
+  HttpServer server(timer, table, service, settings);
+
+  auto listenTask = server.listenHttp(kj::mv(pipe.ends[0]));
+
+  static constexpr auto request = "bad request\r\n\r\n"_kj;
+  auto writePromise = pipe.ends[1]->write(request.begin(), request.size());
+  auto response = pipe.ends[1]->readAllText().wait(waitScope);
+  KJ_EXPECT(writePromise.poll(waitScope));
+  writePromise.wait(waitScope);
+
+  static constexpr auto expectedResponse =
+      "HTTP/1.1 400 Bad Request\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 87\r\n"
+      "\r\n"
+      "Saw protocol error: ERROR: Unrecognized request method.; "
+      "rawContent = bad request\\000\\n"_kj;
+
+  KJ_EXPECT(expectedResponse == response, expectedResponse, response);
 }
 
 class PartialResponseService final: public HttpService {

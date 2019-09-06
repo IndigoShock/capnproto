@@ -321,8 +321,42 @@ public:
     kj::StringPtr statusText;
   };
 
-  kj::Maybe<Request> tryParseRequest(kj::ArrayPtr<char> content);
-  kj::Maybe<Response> tryParseResponse(kj::ArrayPtr<char> content);
+  struct ProtocolError {
+    // Represents a protocol error, such as a bad request method or invalid headers. Debugging such
+    // errors is difficult without a copy of the data which we tried to parse, but this data is
+    // sensitive, so we can't just lump it into the error description directly. ProtocolError
+    // provides this sensitive data separate from the error description.
+    //
+    // TODO(cleanup): Should maybe not live in HttpHeaders? HttpServerErrorHandler::ProtocolError?
+    //   Or HttpProtocolError? Or maybe we need a more general way of attaching sensitive context to
+    //   kj::Exceptions?
+
+    uint statusCode;
+    // Suggested HTTP status code that should be used when returning an error to the client.
+    //
+    // Most errors are 400. An unrecognized method will be 501.
+
+    kj::StringPtr statusMessage;
+    // HTTP status message to go with `statusCode`, e.g. "Bad Request".
+
+    kj::StringPtr description;
+    // An error description safe for all the world to see.
+
+    kj::ArrayPtr<char> rawContent;
+    // Unredacted data which led to the error condition. This may contain anything transported over
+    // HTTP, to include sensitive PII, so you must take care to sanitize this before using it in any
+    // error report that may leak to unprivileged eyes.
+    //
+    // This ArrayPtr is merely a copy of the `content` parameter passed to `tryParseRequest()` /
+    // `tryParseResponse()`, thus it remains valid for as long as a successfully-parsed HttpHeaders
+    // object would remain valid.
+  };
+
+  using RequestOrProtocolError = kj::OneOf<Request, ProtocolError>;
+  using ResponseOrProtocolError = kj::OneOf<Response, ProtocolError>;
+
+  RequestOrProtocolError tryParseRequest(kj::ArrayPtr<char> content);
+  ResponseOrProtocolError tryParseResponse(kj::ArrayPtr<char> content);
   // Parse an HTTP header blob and add all the headers to this object.
   //
   // `content` should be all text from the start of the request to the first occurrance of two
@@ -751,6 +785,8 @@ WebSocketPipe newWebSocketPipe();
 // end. No buffering occurs -- a message send does not complete until a corresponding receive
 // accepts the message.
 
+class HttpServerErrorHandler;
+
 struct HttpServerSettings {
   kj::Duration headerTimeout = 15 * kj::SECONDS;
   // After initial connection open, or after receiving the first byte of a pipelined request,
@@ -767,6 +803,44 @@ struct HttpServerSettings {
   // request so that it can pipeline the next one. We'll give them a grace period defined by the
   // above two values -- if they hit either one, we'll close the socket, but if the request
   // completes, we'll let the connection stay open to handle more requests.
+
+  kj::Maybe<HttpServerErrorHandler&> errorHandler = nullptr;
+  // Customize how client protocol errors and service application exceptions are handled by the
+  // HttpServer. If null, HttpServerErrorHandler's default implementation will be used.
+};
+
+class HttpServerErrorHandler {
+public:
+  virtual kj::Promise<void> handleClientProtocolError(
+      HttpHeaders::ProtocolError protocolError, kj::HttpService::Response& response);
+  virtual kj::Promise<void> handleApplicationError(
+      kj::Exception exception, kj::Maybe<kj::HttpService::Response&> response);
+  virtual kj::Promise<void> handleNoResponse(kj::HttpService::Response& response);
+  // Override these functions to customize error handling during the request/response cycle.
+  //
+  // Client protocol errors arise when the server receives an HTTP message that fails to parse. As
+  // such, HttpService::request() will not have been called yet, and the handler is always
+  // guaranteed an opportunity to send a response. The default implementation of
+  // handleClientProtocolError() replies with a 400 Bad Request response.
+  //
+  // Application errors arise when HttpService::request() throws an exception. The default
+  // implementation of handleApplicationError() maps the following exception types to HTTP statuses,
+  // and generates bodies from the stringified exceptions:
+  //
+  //   - OVERLOADED: 503 Service Unavailable
+  //   - UNIMPLEMENTED: 501 Not Implemented
+  //   - DISCONNECTED: (no response)
+  //   - FAILED: 500 Internal Server Error
+  //
+  // No-response errors occur when HttpService::request() allows its promise to settle before
+  // sending a response. The default implementation of handleNoResponse() replies with a 500
+  // Internal Server Error response.
+  //
+  // Unlike `HttpService::request()`, when calling `response.send()` in the context of one of these
+  // functions, a "Connection: close" header will be added, and the connection will be closed.
+  //
+  // Also unlike `HttpService::request()`, it is okay to return kj::READY_NOW without calling
+  // `response.send()`. In this case, no response will be sent, and the connection will be closed.
 };
 
 class HttpServer final: private kj::TaskSet::ErrorHandler {

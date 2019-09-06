@@ -2,7 +2,11 @@
 
 ACLOCAL_AMFLAGS = -I m4
 
-AUTOMAKE_OPTIONS = foreign subdir-objects
+# We use serial-tests so that test output will be written directly to stdout
+# which is much preferred in CI environments where the test logs may be hard
+# to get at after the fact. Most of our tests are bundled into a single
+# executable anyway so cannot easily be parallelized.
+AUTOMAKE_OPTIONS = foreign subdir-objects serial-tests
 
 # When running distcheck, verify that we've included all the files needed by
 # the cmake build.
@@ -81,6 +85,7 @@ maintainer-clean-local:
 public_capnpc_inputs =                                         \
   src/capnp/c++.capnp                                          \
   src/capnp/schema.capnp                                       \
+  src/capnp/stream.capnp                                       \
   src/capnp/rpc.capnp                                          \
   src/capnp/rpc-twoparty.capnp                                 \
   src/capnp/persistent.capnp                                   \
@@ -96,6 +101,8 @@ capnpc_outputs =                                               \
   src/capnp/c++.capnp.h                                        \
   src/capnp/schema.capnp.c++                                   \
   src/capnp/schema.capnp.h                                     \
+  src/capnp/stream.capnp.c++                                   \
+  src/capnp/stream.capnp.h                                     \
   src/capnp/rpc.capnp.c++                                      \
   src/capnp/rpc.capnp.h                                        \
   src/capnp/rpc-twoparty.capnp.c++                             \
@@ -194,6 +201,7 @@ includecapnp_HEADERS =                                         \
   src/capnp/capability.h                                       \
   src/capnp/membrane.h                                         \
   src/capnp/schema.capnp.h                                     \
+  src/capnp/stream.capnp.h                                     \
   src/capnp/schema-lite.h                                      \
   src/capnp/schema.h                                           \
   src/capnp/schema-loader.h                                    \
@@ -234,10 +242,6 @@ lib_LTLIBRARIES = libkj.la libkj-test.la libcapnp.la
 else
 lib_LTLIBRARIES = libkj.la libkj-test.la libkj-async.la libkj-http.la $(MAYBE_KJ_TLS_LA) libcapnp.la libcapnp-rpc.la libcapnp-json.la libcapnpc.la
 endif
-
-# Don't include security release in soname -- we want to replace old binaries
-# in this case.
-SO_VERSION = $(shell echo $(VERSION) | sed -e 's/^\([0-9]*[.][0-9]*[.][0-9]*\)\([.][0-9]*\)*\(-.*\)*$$/\1\3/g')
 
 libkj_la_LIBADD = $(PTHREAD_LIBS)
 libkj_la_LDFLAGS = -release $(SO_VERSION) -no-undefined
@@ -317,6 +321,7 @@ libcapnp_la_SOURCES=                                           \
   src/capnp/any.c++                                            \
   src/capnp/message.c++                                        \
   src/capnp/schema.capnp.c++                                   \
+  src/capnp/stream.capnp.c++                                   \
   src/capnp/serialize.c++                                      \
   src/capnp/serialize-packed.c++                               \
   $(heavy_sources)
@@ -426,14 +431,14 @@ if USE_EXTERNAL_CAPNP
 
 test_capnpc_middleman: $(test_capnpc_inputs)
 	@$(MKDIR_P) src
-	$(CAPNP) compile --src-prefix=$(srcdir)/src -o$(CAPNPC_CXX):src -I$(srcdir)/src $^
+	$(CAPNP) compile --src-prefix=$(srcdir)/src -o$(CAPNPC_CXX):src -I$(srcdir)/src $$(for FILE in $(test_capnpc_inputs); do echo $(srcdir)/$$FILE; done)
 	touch test_capnpc_middleman
 
 else
 
 test_capnpc_middleman: capnp$(EXEEXT) capnpc-c++$(EXEEXT) $(test_capnpc_inputs)
 	@$(MKDIR_P) src
-	echo $^ | (read CAPNP CAPNPC_CXX SOURCES && ./$$CAPNP compile --src-prefix=$(srcdir)/src -o./$$CAPNPC_CXX:src -I$(srcdir)/src $$SOURCES)
+	./capnp$(EXEEXT) compile --src-prefix=$(srcdir)/src -o./capnpc-c++$(EXEEXT):src -I$(srcdir)/src $$(for FILE in $(test_capnpc_inputs); do echo $(srcdir)/$$FILE; done)
 	touch test_capnpc_middleman
 
 endif
@@ -459,8 +464,11 @@ else !LITE_MODE
 check_PROGRAMS = capnp-test capnp-evolution-test capnp-afl-testcase
 heavy_tests =                                                  \
   src/kj/async-test.c++                                        \
+  src/kj/async-xthread-test.c++                                \
   src/kj/async-unix-test.c++                                   \
+  src/kj/async-unix-xthread-test.c++                           \
   src/kj/async-win32-test.c++                                  \
+  src/kj/async-win32-xthread-test.c++                          \
   src/kj/async-io-test.c++                                     \
   src/kj/parse/common-test.c++                                 \
   src/kj/parse/char-test.c++                                   \
@@ -521,6 +529,7 @@ capnp_test_SOURCES =                                           \
   src/kj/function-test.c++                                     \
   src/kj/io-test.c++                                           \
   src/kj/mutex-test.c++                                        \
+  src/kj/time-test.c++                                         \
   src/kj/threadlocal-test.c++                                  \
   src/kj/threadlocal-pthread-test.c++                          \
   src/kj/filesystem-test.c++                                   \

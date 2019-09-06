@@ -230,6 +230,8 @@ public:
   ~ReaderArena() noexcept(false);
   KJ_DISALLOW_COPY(ReaderArena);
 
+  size_t sizeInWords();
+
   // implements Arena ------------------------------------------------
   SegmentReader* tryGetSegment(SegmentId id) override;
   void reportReadLimitReached() override;
@@ -264,6 +266,8 @@ public:
   ~BuilderArena() noexcept(false);
   KJ_DISALLOW_COPY(BuilderArena);
 
+  size_t sizeInWords();
+
   inline SegmentBuilder* getRootSegment() { return &segment0; }
 
   kj::ArrayPtr<const kj::ArrayPtr<const word>> getSegmentsForOutput();
@@ -286,6 +290,10 @@ public:
     //   deprecate this usage and instead define a new helper type for this exact purpose.
 
     return &localCapTable;
+  }
+
+  kj::Own<_::CapTableBuilder> releaseLocalCapTable() {
+    return kj::heap<LocalCapTable>(kj::mv(localCapTable));
   }
 
   SegmentBuilder* getSegment(SegmentId id);
@@ -321,7 +329,7 @@ private:
   MessageBuilder* message;
   ReadLimiter dummyLimiter;
 
-  class LocalCapTable: public CapTableBuilder {
+  class LocalCapTable final: public CapTableBuilder {
 #if !CAPNP_LITE
   public:
     kj::Maybe<kj::Own<ClientHook>> extractCap(uint index) override;
